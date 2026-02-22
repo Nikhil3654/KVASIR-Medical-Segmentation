@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from scripts._bootstrap import ROOT  # noqa: F401
 from pathlib import Path
 import random
 import sys

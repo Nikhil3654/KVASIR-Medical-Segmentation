@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from scripts._bootstrap import ROOT  # noqa: F401
 import os
 import subprocess
 from pathlib import Path
