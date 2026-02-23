@@ -4,29 +4,28 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import time
-from pathlib import Path
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from src.models.unet import UNet
 from src.data.kvasir_dataset import KvasirSegDataset
 from src.eval.metrics import dice_iou_from_logits
+from src.models.deeplabv3 import DeepLabV3MobileNet
 
 
 @dataclass
 class TrainConfig:
     pairs_csv: Path = Path("data/processed/pairs.csv")
-    image_size: int = 352
-    batch_size: int = 4
+    image_size: int = 256
+    batch_size: int = 2
     lr: float = 1e-3
-    epochs: int = 5
-    base: int = 32
+    epochs: int = 3
     seed: int = 42
     train_frac: float = 0.85
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     out_dir: Path = Path("outputs")
-    num_workers: int = 0  # Windows: keep 0 to avoid multiprocessing issues
+    num_workers: int = 0  # Windows safe
 
 
 def bce_dice_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -43,10 +42,9 @@ def bce_dice_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
     model.eval()
+    losses = []
     dices = []
     ious = []
-    losses = []
-
     for x, y in loader:
         x = x.to(device)
         y = y.to(device)
@@ -56,12 +54,12 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
         losses.append(loss.item())
         dices.append(d)
         ious.append(i)
-
     return {
         "val_loss": float(sum(losses) / max(1, len(losses))),
         "val_dice": float(sum(dices) / max(1, len(dices))),
         "val_iou": float(sum(ious) / max(1, len(ious))),
     }
+
 
 def _cfg_jsonable(cfg: TrainConfig) -> dict:
     d = dict(cfg.__dict__)
@@ -69,6 +67,7 @@ def _cfg_jsonable(cfg: TrainConfig) -> dict:
         if isinstance(v, Path):
             d[k] = str(v)
     return d
+
 
 def train(cfg: TrainConfig) -> dict:
     torch.manual_seed(cfg.seed)
@@ -94,7 +93,7 @@ def train(cfg: TrainConfig) -> dict:
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
 
-    model = UNet(in_channels=3, out_channels=1, base=cfg.base).to(cfg.device)
+    model = DeepLabV3MobileNet(out_channels=1).to(cfg.device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
     ckpt_dir = cfg.out_dir / "checkpoints"
@@ -102,6 +101,7 @@ def train(cfg: TrainConfig) -> dict:
 
     best = {"val_dice": -1.0}
     history = []
+    cfg_dict = _cfg_jsonable(cfg)
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -111,7 +111,6 @@ def train(cfg: TrainConfig) -> dict:
         for x, y in train_loader:
             x = x.to(cfg.device)
             y = y.to(cfg.device)
-
             opt.zero_grad(set_to_none=True)
             logits = model(x)
             loss = bce_dice_loss(logits, y)
@@ -135,27 +134,17 @@ def train(cfg: TrainConfig) -> dict:
         if metrics["val_dice"] > best["val_dice"]:
             best = metrics
             torch.save(
-                {
-                    "model_state": model.state_dict(),
-                    "cfg": cfg.__dict__,
-                    "best": best,
-                },
-                ckpt_dir / "unet_best.pt",
+                {"model_state": model.state_dict(), "cfg": cfg_dict, "best": best},
+                ckpt_dir / "deeplabv3_best.pt",
             )
 
-    # Save training summary
     run_dir = cfg.out_dir / "runs"
     run_dir.mkdir(parents=True, exist_ok=True)
-    cfg_dict = _cfg_jsonable(cfg)
-    for k, v in list(cfg_dict.items()):
-        if isinstance(v, Path):
-            cfg_dict[k] = str(v)
 
     summary = {"best": best, "history": history, "cfg": cfg_dict}
+    with (run_dir / "deeplabv3_day4_summary.json").open("w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
 
-    with (run_dir / "unet_day3_summary.json").open("w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2)
-
-    print("Saved best checkpoint to:", ckpt_dir / "unet_best.pt")
-    print("Saved summary to:", run_dir / "unet_day3_summary.json")
+    print("Saved best checkpoint to:", ckpt_dir / "deeplabv3_best.pt")
+    print("Saved summary to:", run_dir / "deeplabv3_day4_summary.json")
     return summary
